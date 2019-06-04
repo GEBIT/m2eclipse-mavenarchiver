@@ -222,8 +222,9 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 		IFile manifest = outputdir.getFolder("META-INF").getFile("MANIFEST.MF");
 
 		if (forceGeneration || needsNewManifest(manifest, oldFacade, newFacade, monitor)) {
-			generateManifest(newFacade, manifest, monitor);
-			refresh(newFacade, outputdir, monitor);
+			if (generateManifest(newFacade, manifest, monitor)) {
+				refresh(newFacade, manifest, monitor);
+			}
 		}
 
 	}
@@ -246,10 +247,10 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 	 * @param monitor     the progress monitor
 	 * @throws CoreException
 	 */
-	protected void refresh(IMavenProjectFacade mavenFacade, IFolder outputdir, IProgressMonitor monitor)
+	protected void refresh(IMavenProjectFacade mavenFacade, IResource outputdir, IProgressMonitor monitor)
 			throws CoreException {
 		// refresh the target folder
-		if (outputdir.exists()) {
+		if (outputdir.exists() && !outputdir.isDerived(IResource.CHECK_ANCESTORS)) {
 			try {
 				outputdir.refreshLocal(IResource.DEPTH_INFINITE, monitor);
 			} catch (Exception e) {
@@ -280,7 +281,7 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 	protected boolean needsNewManifest(IFile manifest, IMavenProjectFacade oldFacade, IMavenProjectFacade newFacade,
 			IProgressMonitor monitor) {
 
-		if (!manifest.exists()) {
+		if (!manifest.getLocation().toFile().exists()) {
 			return true;
 		}
 		// Can't compare to a previous state, so assuming it's unchanged
@@ -378,7 +379,7 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 		return pluginConfig.getChild(ARCHIVE_NODE);
 	}
 
-	public void generateManifest(IMavenProjectFacade mavenFacade, IFile manifest, IProgressMonitor monitor)
+	public boolean generateManifest(IMavenProjectFacade mavenFacade, IFile manifest, IProgressMonitor monitor)
 			throws CoreException {
 
 		MavenProject mavenProject = mavenFacade.getMavenProject();
@@ -402,7 +403,7 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 						Collections.singletonList("package"), true, monitor);
 				MojoExecution mojoExecution = getExecution(executionPlan, getExecutionKey());
 				if (mojoExecution == null) {
-					return;
+					return false;
 				}
 
 				// Get the target manifest file
@@ -417,14 +418,14 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 				mavenProject.setArtifacts(fixArtifactFileNames(mavenFacade));
 
 				// Invoke the manifest generation API via reflection
-				reflectManifestGeneration(mavenFacade, mojoExecution, session,
+				return reflectManifestGeneration(mavenFacade, mojoExecution, session,
 						new File(manifest.getLocation().toOSString()));
 			} finally {
 				Thread.currentThread().setContextClassLoader(originalTCL);
 			}
 		} catch (Exception ex) {
 			markerManager.addErrorMarkers(mavenFacade.getPom(), MavenArchiverConstants.MAVENARCHIVER_MARKER_ERROR, ex);
-
+			return false;
 		} finally {
 			// Restore the project state
 			mavenProject.setArtifacts(originalArtifacts);
@@ -447,7 +448,7 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 		return maven.createSession(request, mavenFacade.getMavenProject());
 	}
 
-	private void reflectManifestGeneration(IMavenProjectFacade facade, MojoExecution mojoExecution,
+	private boolean reflectManifestGeneration(IMavenProjectFacade facade, MojoExecution mojoExecution,
 			MavenSession session, File manifestFile) throws Exception {
 
 		ClassLoader loader = null;
@@ -496,12 +497,14 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 				
 				// Serialize the Manifest instance to an actual file
 				writeManifest(manifestFile, manifest);
+				return true;
 			}
 		} finally {
 			mojoExecution.setConfiguration(originalConfig);
 
 			maven.releaseMojo(mojo, mojoExecution);
 		}
+		return false;
 	}
 
 	private void writeManifest(File manifestFile, Object manifest) throws UnsupportedEncodingException, FileNotFoundException, IllegalAccessException, IllegalArgumentException, InvocationTargetException {
