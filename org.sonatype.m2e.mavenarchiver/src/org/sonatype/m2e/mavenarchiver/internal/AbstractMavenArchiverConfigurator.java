@@ -238,21 +238,20 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 	protected abstract IPath getOutputDir(IMavenProjectFacade facade);
 
 	/**
-	 * Refreshes the output directory of the maven project after file
-	 * generation.<br/>
+	 * Refreshes the output resource of the maven project after file generation.<br/>
 	 * Implementations can override this method to add some post processing.
 	 * 
-	 * @param mavenFacade the maven facade
-	 * @param outputdir   the output directory to refresh
-	 * @param monitor     the progress monitor
+	 * @param mavenFacade    the maven facade
+	 * @param outputResource the output resource to refresh
+	 * @param monitor        the progress monitor
 	 * @throws CoreException
 	 */
-	protected void refresh(IMavenProjectFacade mavenFacade, IResource outputdir, IProgressMonitor monitor)
+	protected void refresh(IMavenProjectFacade mavenFacade, IResource outputResource, IProgressMonitor monitor)
 			throws CoreException {
 		// refresh the target folder
-		if (outputdir.exists() && !outputdir.isDerived(IResource.CHECK_ANCESTORS)) {
+		if (outputResource.exists() && !outputResource.isDerived(IResource.CHECK_ANCESTORS)) {
 			try {
-				outputdir.refreshLocal(IResource.DEPTH_INFINITE, monitor);
+				outputResource.refreshLocal(IResource.DEPTH_INFINITE, monitor);
 			} catch (Exception e) {
 				e.printStackTrace();
 				// random java.lang.IllegalArgumentException: Element not found:
@@ -552,12 +551,20 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 		if (archiverField == null) {
 			// Since maven-jar-plugin 3.1.2, the field doesn't exist anymore, search for an
 			// archiver map instead.
-			Field archiversField = findField("archivers", mojoClass);
-			if (archiversField != null) {
-				archiversField.setAccessible(true);
-				Map archivers = (Map) archiversField.get(mojo);
-				String key = isModular(project)?"mjar":"jar";
-				archiver = archivers.get(key);
+			// GBLD-783: archivers map is empty if accessed from thread with context class loader different from 
+			// maven-jar-plugin ClassRealm
+			ClassLoader oldClassLoader = Thread.currentThread().getContextClassLoader();
+			Thread.currentThread().setContextClassLoader(mojoClass.getClassLoader());
+			try {
+				Field archiversField = findField("archivers", mojoClass);
+				if (archiversField != null) {
+					archiversField.setAccessible(true);
+					Map archivers = (Map) archiversField.get(mojo);
+					String key = isModular(project)?"mjar":"jar";
+					archiver = archivers.get(key);
+				}
+			} finally {
+				Thread.currentThread().setContextClassLoader(oldClassLoader);
 			}
 		} else {
 			archiverField.setAccessible(true);
