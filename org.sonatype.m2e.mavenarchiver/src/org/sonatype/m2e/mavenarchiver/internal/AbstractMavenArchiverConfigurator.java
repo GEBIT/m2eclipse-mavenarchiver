@@ -8,6 +8,7 @@
 
 package org.sonatype.m2e.mavenarchiver.internal;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -17,6 +18,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.Reader;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.io.UTFDataFormatException;
 import java.io.UnsupportedEncodingException;
 import java.io.Writer;
 import java.lang.reflect.Constructor;
@@ -28,6 +32,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.jar.Attributes;
@@ -45,6 +50,7 @@ import org.apache.maven.plugin.MojoExecution;
 import org.apache.maven.project.MavenProject;
 import org.codehaus.plexus.classworlds.realm.ClassRealm;
 import org.codehaus.plexus.util.IOUtil;
+import org.codehaus.plexus.util.ReaderFactory;
 import org.codehaus.plexus.util.ReflectionUtils;
 import org.codehaus.plexus.util.WriterFactory;
 import org.codehaus.plexus.util.xml.Xpp3Dom;
@@ -249,16 +255,14 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 	protected void refresh(IMavenProjectFacade mavenFacade, IResource outputResource, IProgressMonitor monitor)
 			throws CoreException {
 		// refresh the target folder
-		if (outputResource.exists() && !outputResource.isDerived(IResource.CHECK_ANCESTORS)) {
-			try {
-				outputResource.refreshLocal(IResource.DEPTH_INFINITE, monitor);
-			} catch (Exception e) {
-				e.printStackTrace();
-				// random java.lang.IllegalArgumentException: Element not found:
-				// /parent/project/target/classes/META-INF.
-				// occur when refreshing the folder on project import / creation
-				// See https://bugs.eclipse.org/bugs/show_bug.cgi?id=244315
-			}
+		try {
+			outputResource.refreshLocal(IResource.DEPTH_INFINITE, monitor);
+		} catch (Exception e) {
+			e.printStackTrace();
+			// random java.lang.IllegalArgumentException: Element not found:
+			// /parent/project/target/classes/META-INF.
+			// occur when refreshing the folder on project import / creation
+			// See https://bugs.eclipse.org/bugs/show_bug.cgi?id=244315
 		}
 	}
 
@@ -495,8 +499,7 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 				mergeManifests(manifest, userManifest);
 				
 				// Serialize the Manifest instance to an actual file
-				writeManifest(manifestFile, manifest);
-				return true;
+				return writeManifest(manifestFile, manifest);
 			}
 		} finally {
 			mojoExecution.setConfiguration(originalConfig);
@@ -506,12 +509,38 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 		return false;
 	}
 
-	private void writeManifest(File manifestFile, Object manifest) throws UnsupportedEncodingException, FileNotFoundException, IllegalAccessException, IllegalArgumentException, InvocationTargetException {
+	private boolean writeManifest(File manifestFile, Object manifest) throws UnsupportedEncodingException, FileNotFoundException, IllegalAccessException, IllegalArgumentException, InvocationTargetException {
+		String oldManifestContent = null;
+		if (manifestFile.exists()) {
+			Reader reader = null;
+			try {
+				reader = ReaderFactory.newReader(manifestFile, ReaderFactory.UTF_8);
+				char[] arr = new char[8 * 1024];
+				StringBuilder buffer = new StringBuilder();
+				int numCharsRead;
+				while ((numCharsRead = reader.read(arr, 0, arr.length)) != -1) {
+					buffer.append(arr, 0, numCharsRead);
+				}
+				oldManifestContent = buffer.toString();
+			} catch (IOException exc) {
+				// ignore
+			} finally {
+				if (reader != null) {
+					try {
+						reader.close();
+					} catch (IOException exc) {
+						// ignore
+					}
+				}
+			}
+		}
+		
+		StringWriter stringWriter = new StringWriter();
 		PrintWriter printWriter = null;
 		try {
 			Method write = getWriteMethod(manifest);
 			if (write != null) {
-				printWriter = new PrintWriter(WriterFactory.newWriter(manifestFile, WriterFactory.UTF_8));
+				printWriter = new PrintWriter(stringWriter);
 				write.invoke(manifest, printWriter);
 			}		
 		} finally {
@@ -519,7 +548,49 @@ public abstract class AbstractMavenArchiverConfigurator extends AbstractProjectC
 				printWriter.close();
 			}
 		}
-			
+		String newManifestContent = stringWriter.toString();
+		if (isSameManifestContent(oldManifestContent, newManifestContent)) {
+			return false;
+		}
+		try {
+			printWriter = new PrintWriter(WriterFactory.newWriter(manifestFile, WriterFactory.UTF_8));
+			printWriter.write(newManifestContent);
+			printWriter.flush();		
+		} finally {
+			if (printWriter != null) {
+				printWriter.close();
+			}
+		}
+		return true;
+	}
+
+	protected boolean isSameManifestContent(String oldManifestContent, String newManifestContent) {
+		if (oldManifestContent == null) {
+			return false;
+		}
+		BufferedReader oldManifestReader = new BufferedReader(new StringReader(oldManifestContent));
+		BufferedReader newManifestReader = new BufferedReader(new StringReader(newManifestContent));
+		String newLine;
+		String oldLine;
+		try {
+			do {
+				newLine = newManifestReader.readLine();
+				oldLine = oldManifestReader.readLine();
+				if (newLine != null && newLine.startsWith("Build-Time:")) {
+					if (oldLine == null || !oldLine.startsWith("Build-Time:")) {
+						return false;
+					}
+					continue;
+				}
+				if (!Objects.equals(newLine, oldLine)) {
+					return false;
+				}
+			} while (newLine != null || oldLine != null);
+		} catch (IOException exc) {
+			// can't be reached
+			return false;
+		}
+		return true;
 	}
 
 	private Object getManifest(MavenSession session, MavenProject mavenProject, Object archiveConfiguration,
